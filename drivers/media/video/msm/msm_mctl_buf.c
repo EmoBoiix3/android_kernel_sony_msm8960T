@@ -1,4 +1,5 @@
 /* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2013 Sony Mobile Communications AB.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -264,7 +265,7 @@ static void msm_vb2_ops_buf_cleanup(struct vb2_buffer *vb)
 		spin_unlock_irqrestore(&pcam_inst->vq_irqlock, flags);
 	}
 	pmctl = msm_cam_server_get_mctl(pcam->mctl_handle);
-	if (pmctl == NULL) {
+	if (pmctl == NULL || pmctl->client == NULL) {
 		pr_err("%s No mctl found\n", __func__);
 		buf->state = MSM_BUFFER_STATE_UNUSED;
 		return;
@@ -451,7 +452,12 @@ int msm_mctl_buf_done_proc(
 		D("%s Copying timestamp as %ld.%ld", __func__,
 			cam_ts->timestamp.tv_sec, cam_ts->timestamp.tv_usec);
 		buf->vidbuf.v4l2_buf.timestamp = cam_ts->timestamp;
+		buf->vidbuf.v4l2_buf.sequence  = cam_ts->frame_id;
 	}
+	pcam_inst->sequence = buf->vidbuf.v4l2_buf.sequence;
+	D("%s Notify user about buffer %d image_mode %d frame_id %d", __func__,
+		buf->vidbuf.v4l2_buf.index, pcam_inst->image_mode,
+		buf->vidbuf.v4l2_buf.sequence);
 	vb2_buffer_done(&buf->vidbuf, VB2_BUF_STATE_DONE);
 	return 0;
 }
@@ -679,9 +685,13 @@ int msm_mctl_reserve_free_buf(
 	 * camera instance, he would send the preferred camera instance.
 	 * If the preferred camera instance is NULL, get the
 	 * camera instance using the image mode passed */
-	if (!pcam_inst)
+	if (!pcam_inst) {
 		pcam_inst = msm_mctl_get_pcam_inst(pmctl, buf_handle);
-
+		if(!pcam_inst) {
+			pr_err("%s: pcam_inst is NULL\n", __func__);
+			return rc;
+		}
+	}
 	if (!pcam_inst || !pcam_inst->streamon) {
 		pr_err("%s: stream is turned off\n", __func__);
 		return rc;
@@ -848,7 +858,8 @@ int msm_mctl_buf_done_pp(struct msm_cam_media_controller *pmctl,
 		__func__, pcam_inst, frame->ch_paddr[0], ret_frame->dirty);
 	cam_ts.present = 1;
 	cam_ts.timestamp = ret_frame->timestamp;
-	if (ret_frame->dirty)
+	cam_ts.frame_id   = ret_frame->frame_id;
+	if (ret_frame->dirty || (ret_frame->frame_id < pcam_inst->sequence))
 		/* the frame is dirty, not going to disptach to app */
 		rc = msm_mctl_release_free_buf(pmctl, pcam_inst, frame);
 	else

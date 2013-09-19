@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -56,7 +56,7 @@ struct adreno_ringbuffer {
 	unsigned int wptr; /* write pointer offset in dwords from baseaddr */
 	unsigned int rptr; /* read pointer offset in dwords from baseaddr */
 
-	unsigned int timestamp[KGSL_MEMSTORE_MAX];
+	unsigned int global_ts;
 };
 
 
@@ -97,8 +97,7 @@ int adreno_ringbuffer_issueibcmds(struct kgsl_device_private *dev_priv,
 
 int adreno_ringbuffer_init(struct kgsl_device *device);
 
-int adreno_ringbuffer_start(struct adreno_ringbuffer *rb,
-				unsigned int init_ram);
+int adreno_ringbuffer_start(struct adreno_ringbuffer *rb);
 
 void adreno_ringbuffer_stop(struct adreno_ringbuffer *rb);
 
@@ -107,11 +106,6 @@ void adreno_ringbuffer_close(struct adreno_ringbuffer *rb);
 unsigned int adreno_ringbuffer_issuecmds(struct kgsl_device *device,
 					struct adreno_context *drawctxt,
 					unsigned int flags,
-					unsigned int *cmdaddr,
-					int sizedwords);
-
-void adreno_ringbuffer_issuecmds_intr(struct kgsl_device *device,
-					struct kgsl_context *k_ctxt,
 					unsigned int *cmdaddr,
 					int sizedwords);
 

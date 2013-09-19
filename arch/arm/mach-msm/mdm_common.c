@@ -103,12 +103,14 @@ struct mdm_device {
 	struct work_struct sfr_reason_work;
 
 	struct notifier_block mdm_panic_blk;
+	struct notifier_block ssr_notifier_blk;
 
 	int ssr_started_internally;
 };
 
 static struct list_head	mdm_devices;
 static DEFINE_SPINLOCK(mdm_devices_lock);
+static int disable_boot_timeout = 0;
 
 static int ssr_count;
 static DEFINE_SPINLOCK(ssr_lock);
@@ -143,6 +145,27 @@ static void mdm_device_list_remove(struct mdm_device *mdev)
 	spin_unlock_irqrestore(&mdm_devices_lock, flags);
 }
 
+static int param_set_disable_boot_timeout(const char *val,
+		const struct kernel_param *kp)
+{
+	int rcode;
+	pr_info("%s called\n",__func__);
+	rcode = param_set_bool(val, kp);
+	if (rcode)
+		pr_err("%s: Failed to set boot_timout_disabled flag\n",
+				__func__);
+	pr_info("%s: disable_boot_timeout is now %d\n",
+			__func__, disable_boot_timeout);
+	return rcode;
+}
+
+static struct kernel_param_ops disable_boot_timeout_ops = {
+	.set = param_set_disable_boot_timeout,
+	.get = param_get_bool,
+};
+module_param_cb(disable_boot_timeout, &disable_boot_timeout_ops,
+		&disable_boot_timeout, 0644);
+MODULE_PARM_DESC(disable_boot_timeout, "Disable panic on mdm bootup timeout");
 /* If the platform's cascading_ssr flag is set, the subsystem
  * restart module will restart the other modems so stop
  * monitoring them as well.
@@ -327,7 +350,8 @@ static void mdm2ap_status_check(struct work_struct *work)
 		if (gpio_get_value(mdm_drv->mdm2ap_status_gpio) == 0) {
 			pr_err("%s: MDM2AP_STATUS did not go high on mdm id %d\n",
 				   __func__, mdev->mdm_data.device_id);
-			mdm_start_ssr(mdev);
+			if (!disable_boot_timeout)
+				mdm_start_ssr(mdev);
 		}
 	}
 }
@@ -372,6 +396,7 @@ static long mdm_modem_ioctl(struct file *filp, unsigned int cmd,
 	int status, ret = 0;
 	struct mdm_device *mdev = filp->private_data;
 	struct mdm_modem_drv *mdm_drv;
+	struct mdm_device *l_mdev;
 
 	if (_IOC_TYPE(cmd) != CHARM_CODE) {
 		pr_err("%s: invalid ioctl code to mdm id %d\n",
@@ -457,6 +482,14 @@ static long mdm_modem_ioctl(struct file *filp, unsigned int cmd,
 		pr_debug("%s Image upgrade ioctl recieved\n", __func__);
 		if (mdm_drv->pdata->image_upgrade_supported &&
 				mdm_ops->image_upgrade_cb) {
+			list_for_each_entry(l_mdev, &mdm_devices, link) {
+				if (l_mdev != mdev) {
+					pr_debug("%s:setting mdm_rdy to false",
+							__func__);
+					atomic_set(&l_mdev->mdm_data.mdm_ready,
+							0);
+				}
+			}
 			get_user(status, (unsigned long __user *) arg);
 			mdm_ops->image_upgrade_cb(mdm_drv, status);
 		} else
@@ -476,41 +509,7 @@ static long mdm_modem_ioctl(struct file *filp, unsigned int cmd,
 		if (ret)
 			pr_err("%s:Graceful shutdown of mdm failed, ret = %d\n",
 			   __func__, ret);
-		break;
-#ifdef CONFIG_SONY_QSCFLASHING_UART4
-	case START_EDLOAD:
-		get_user(status, (unsigned long __user *) arg);
-		pr_info("START_EDLOAD received,status:%d\n", status);
-		if (status)
-			mdm_drv->mdm_ready = 0;
-		mdm_drv->mdm_edload_status = 1;
-		gpio_set_value(AP2MDM_EDLOAD, 1);
-		break;
-	case EDLOAD_DONE:
-		pr_info("%s: EDLOAD_DONE received\n", __func__);
-		if (mdm_drv->mdm_edload_status)
-			mdm_drv->mdm_edload_status = 0;
-		gpio_set_value(AP2MDM_EDLOAD, 0);
-		break;
-	case GET_HW_CONFIG:
-		pr_debug("get hardware config\n");
-		gpio_request(MDM_HW_ID_FIRST, "HW_ID_FIRST");
-		gpio_request(MDM_HW_ID_SECOND, "HW_ID_SECOND");
-		gpio_request(MDM_HW_ID_THIRD, "HW_ID_THIRD");
-		gpio_request(MDM_HW_ID_FORTH, "HW_ID_FORTH");
-		if (gpio_get_value(MDM_HW_ID_FIRST) == 1)
-			hw_id = 1;
-		if (gpio_get_value(MDM_HW_ID_SECOND) == 1)
-			hw_id += 2;
-		if (gpio_get_value(MDM_HW_ID_THIRD) == 1)
-			hw_id += 4;
-		if (gpio_get_value(MDM_HW_ID_FORTH) == 1)
-			hw_id += 8;
-		put_user(hw_id, (unsigned long __user *) arg);
-		gpio_free(MDM_HW_ID_FIRST);
-		gpio_free(MDM_HW_ID_SECOND);
-		gpio_free(MDM_HW_ID_THIRD);
-		gpio_free(MDM_HW_ID_FORTH);
+		put_user(ret, (unsigned long __user *) arg);
 		break;
 #endif
 	default:
@@ -573,6 +572,24 @@ static int mdm_modem_open(struct inode *inode, struct file *file)
 
 	file->private_data = mdev;
 	return 0;
+}
+
+static int ssr_notifier_cb(struct notifier_block *this,
+				unsigned long code,
+				void *data)
+{
+	struct mdm_device *mdev =
+		container_of(this, struct mdm_device, ssr_notifier_blk);
+
+	switch (code) {
+	case SUBSYS_AFTER_POWERUP:
+		mdm_ssr_completed(mdev);
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_DONE;
 }
 
 static int mdm_panic_prep(struct notifier_block *this,
@@ -698,7 +715,6 @@ static int mdm_subsys_powerup(const struct subsys_desc *crashed_subsys)
 
 	mdm_ops->power_on_mdm_cb(mdm_drv);
 	mdm_drv->boot_type = CHARM_NORMAL_BOOT;
-	mdm_ssr_completed(mdev);
 	complete(&mdev->mdm_needs_reload);
 	if (!wait_for_completion_timeout(&mdev->mdm_boot,
 			msecs_to_jiffies(MDM_BOOT_TIMEOUT))) {
@@ -812,12 +828,18 @@ static void mdm_modem_initialize_data(struct platform_device *pdev,
 
 	memset((void *)&mdev->mdm_subsys, 0,
 		   sizeof(struct subsys_desc));
-	if (mdev->mdm_data.device_id <= 0)
-		snprintf(mdev->subsys_name, sizeof(mdev->subsys_name),
-			 "%s",  EXTERNAL_MODEM);
-	else
-		snprintf(mdev->subsys_name, sizeof(mdev->subsys_name),
-			 "%s.%d",  EXTERNAL_MODEM, mdev->mdm_data.device_id);
+	if (mdm_drv->pdata->subsys_name) {
+		strlcpy(mdev->subsys_name, mdm_drv->pdata->subsys_name,
+				sizeof(mdev->subsys_name));
+	} else {
+		if (mdev->mdm_data.device_id <= 0)
+			snprintf(mdev->subsys_name, sizeof(mdev->subsys_name),
+				"%s",  EXTERNAL_MODEM);
+		else
+			snprintf(mdev->subsys_name, sizeof(mdev->subsys_name),
+				"%s.%d",  EXTERNAL_MODEM,
+				mdev->mdm_data.device_id);
+	}
 	mdev->mdm_subsys.shutdown = mdm_subsys_shutdown;
 	mdev->mdm_subsys.ramdump = mdm_subsys_ramdumps;
 	mdev->mdm_subsys.powerup = mdm_subsys_powerup;
@@ -1006,6 +1028,11 @@ static int mdm_configure_ipc(struct mdm_device *mdev)
 		ret = PTR_ERR(mdev->mdm_subsys_dev);
 		goto fatal_err;
 	}
+	memset((void *)&mdev->ssr_notifier_blk, 0,
+			sizeof(struct notifier_block));
+	mdev->ssr_notifier_blk.notifier_call  = ssr_notifier_cb;
+	subsys_notif_register_notifier(mdev->subsys_name,
+			&mdev->ssr_notifier_blk);
 
 	/* ERR_FATAL irq. */
 	irq = MSM_GPIO_TO_INT(mdm_drv->mdm2ap_errfatal_gpio);

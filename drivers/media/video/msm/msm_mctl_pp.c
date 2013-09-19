@@ -104,77 +104,12 @@ int msm_mctl_check_pp(struct msm_cam_media_controller *p_mctl,
 			*pp_type = OUTPUT_TYPE_T;
 		break;
 	case MSM_V4L2_EXT_CAPTURE_MODE_RDI:
-		pp_key = PP_RDI_PREV;
 		if (p_mctl->pp_info.pp_ctrl.pp_msg_type & OUTPUT_TYPE_R)
 			*pp_type = OUTPUT_TYPE_R;
-		if (p_mctl->pp_info.pp_key & pp_key)
-			*pp_divert_type = OUTPUT_TYPE_R;
 		break;
 	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
-		break;
-	case MSM_V4L2_EXT_CAPTURE_MODE_RDI2:
-		*pp_divert_type = OUTPUT_TYPE_R2;
+		if (p_mctl->pp_info.pp_key & PP_RDI)
+			*pp_divert_type = OUTPUT_TYPE_R2;
 		break;
 	default:
 		break;
@@ -442,6 +377,12 @@ static int msm_mctl_pp_get_phy_addr(
 		pp_frame->num_planes = pcam_inst->plane_info.num_planes;
 		for (i = 0; i < pp_frame->num_planes; i++) {
 			mem = vb2_plane_cookie(&vb->vidbuf, i);
+			if (mem == NULL) {
+				pr_err("%s frame id %d buffer %d plane %d, invalid plane cookie "
+					, __func__, pp_frame->frame_id,
+					 buf_idx, i);
+				return -EINVAL;
+			}
 			pp_frame->mp[i].addr_offset = mem->addr_offset;
 			pp_frame->mp[i].phy_addr =
 				videobuf2_to_pmem_contig(&vb->vidbuf, i);
@@ -643,6 +584,9 @@ int msm_mctl_pp_release_free_frame(
 			__func__);
 		return -EINVAL;
 	}
+	memset(&p_mctl->pp_info.div_frame[image_mode],
+		   0, sizeof(struct msm_free_buf));
+
 	rc = msm_mctl_release_free_buf(p_mctl, pcam_inst, &free_buf);
 	D("%s: release free buf, rc = %d, phy = 0x%x",
 		__func__, rc, free_buf.ch_paddr[0]);
@@ -696,7 +640,7 @@ int msm_mctl_pp_done(
 			msm_mctl_pp_path_to_img_mode(frame.path);
 		image_mode = buf_handle.image_mode;
 	}
-	if (image_mode < 0) {
+	if (image_mode < 0 || image_mode >= MSM_MAX_IMG_MODE) {
 		pr_err("%s Invalid image mode\n", __func__);
 		return image_mode;
 	}
@@ -725,6 +669,9 @@ int msm_mctl_pp_done(
 	ret_frame.dirty = dirty;
 	ret_frame.node_type = 0;
 	ret_frame.timestamp = frame.timestamp;
+	ret_frame.frame_id   = frame.frame_id;
+	D("%s frame_id: %d buffer idx %d\n", __func__,
+		frame.frame_id, frame.buf_idx);
 	rc = msm_mctl_buf_done_pp(p_mctl, &buf_handle, &buf, &ret_frame);
 	return rc;
 }
@@ -767,6 +714,7 @@ int msm_mctl_pp_divert_done(
 	ret_frame.dirty = 0;
 	ret_frame.node_type = frame.node_type;
 	ret_frame.timestamp = frame.timestamp;
+	ret_frame.frame_id  = frame.frame_id;
 	D("%s Frame done id: %d\n", __func__, frame.frame_id);
 	rc = msm_mctl_buf_done_pp(p_mctl, &buf_handle, &buf, &ret_frame);
 	return rc;
