@@ -12,7 +12,7 @@
 
 #ifndef _ARCH_ARM_MACH_MSM_MDM2_H
 #define _ARCH_ARM_MACH_MSM_MDM2_H
-#include "sysmon.h"
+#include "../../sysmon.h"
 
 struct mdm_vddmin_resource {
 	int rpm_id;
@@ -40,6 +40,9 @@ struct mdm_platform_data {
 	int sysmon_subsys_id_valid;
 	enum subsys_id sysmon_subsys_id;
 	int no_a2m_errfatal_on_ssr;
+	int no_reset_on_first_powerup;
+	int kpd_not_inverted;
+	char *subsys_name;
 };
 
 #ifdef CONFIG_SONY_QSCFLASHING_UART4

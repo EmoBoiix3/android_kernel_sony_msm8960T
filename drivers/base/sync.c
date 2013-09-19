@@ -30,6 +30,8 @@
 
 static void sync_fence_signal_pt(struct sync_pt *pt);
 static int _sync_pt_has_signaled(struct sync_pt *pt);
+static void sync_fence_free(struct kref *kref);
+static void sync_dump(struct sync_fence *fence);
 
 static LIST_HEAD(sync_timeline_list_head);
 static DEFINE_SPINLOCK(sync_timeline_list_lock);
@@ -306,10 +308,66 @@ static int sync_fence_copy_pts(struct sync_fence *dst, struct sync_fence *src)
 
 		new_pt->fence = dst;
 		list_add(&new_pt->pt_list, &dst->pt_list_head);
-		sync_pt_activate(new_pt);
 	}
 
 	return 0;
+}
+
+static int sync_fence_merge_pts(struct sync_fence *dst, struct sync_fence *src)
+{
+	struct list_head *src_pos, *dst_pos, *n;
+
+	list_for_each(src_pos, &src->pt_list_head) {
+		struct sync_pt *src_pt =
+			container_of(src_pos, struct sync_pt, pt_list);
+		bool collapsed = false;
+
+		list_for_each_safe(dst_pos, n, &dst->pt_list_head) {
+			struct sync_pt *dst_pt =
+				container_of(dst_pos, struct sync_pt, pt_list);
+			/* collapse two sync_pts on the same timeline
+			 * to a single sync_pt that will signal at
+			 * the later of the two
+			 */
+			if (dst_pt->parent == src_pt->parent) {
+				if (dst_pt->parent->ops->compare(dst_pt, src_pt) == -1) {
+					struct sync_pt *new_pt =
+						sync_pt_dup(src_pt);
+					if (new_pt == NULL)
+						return -ENOMEM;
+
+					new_pt->fence = dst;
+					list_replace(&dst_pt->pt_list,
+						     &new_pt->pt_list);
+					sync_pt_free(dst_pt);
+				}
+				collapsed = true;
+				break;
+			}
+		}
+
+		if (!collapsed) {
+			struct sync_pt *new_pt = sync_pt_dup(src_pt);
+
+			if (new_pt == NULL)
+				return -ENOMEM;
+
+			new_pt->fence = dst;
+			list_add(&new_pt->pt_list, &dst->pt_list_head);
+		}
+	}
+
+	return 0;
+}
+
+static void sync_fence_detach_pts(struct sync_fence *fence)
+{
+	struct list_head *pos, *n;
+
+	list_for_each_safe(pos, n, &fence->pt_list_head) {
+		struct sync_pt *pt = container_of(pos, struct sync_pt, pt_list);
+		sync_timeline_remove_pt(pt);
+	}
 }
 
 static void sync_fence_free_pts(struct sync_fence *fence)
@@ -376,6 +434,7 @@ struct sync_fence *sync_fence_merge(const char *name,
 				    struct sync_fence *a, struct sync_fence *b)
 {
 	struct sync_fence *fence;
+	struct list_head *pos;
 	int err;
 
 	fence = sync_fence_alloc(name);
@@ -390,7 +449,19 @@ struct sync_fence *sync_fence_merge(const char *name,
 	if (err < 0)
 		goto err;
 
-	fence->status = sync_fence_get_status(fence);
+	list_for_each(pos, &fence->pt_list_head) {
+		struct sync_pt *pt =
+			container_of(pos, struct sync_pt, pt_list);
+		sync_pt_activate(pt);
+	}
+
+	/*
+	 * signal the fence in case one of it's pts were activated before
+	 * they were activated
+	 */
+	sync_fence_signal_pt(list_first_entry(&fence->pt_list_head,
+					      struct sync_pt,
+					      pt_list));
 
 	return fence;
 err:
@@ -505,10 +576,17 @@ int sync_fence_wait(struct sync_fence *fence, long timeout)
 	if (err < 0)
 		return err;
 
-	if (fence->status < 0)
+	if (fence->status < 0) {
+		pr_info("fence error %d on [%p]\n", fence->status, fence);
+		sync_dump(fence);
 		return fence->status;
 
-	if (fence->status == 0)
+	if (fence->status == 0) {
+		if (timeout > 0) {
+			pr_info("fence timeout on [%p] after %dms\n", fence,
+				jiffies_to_msecs(timeout));
+			sync_dump(fence);
+		}
 		return -ETIME;
 
 	return 0;
@@ -824,7 +902,36 @@ static __init int sync_debugfs_init(void)
 	debugfs_create_file("sync", S_IRUGO, NULL, NULL, &sync_debugfs_fops);
 	return 0;
 }
-
 late_initcall(sync_debugfs_init);
 
+#define DUMP_CHUNK 256
+static char sync_dump_buf[64 * 1024];
+static void sync_dump(struct sync_fence *fence)
+{
+       struct seq_file s = {
+               .buf = sync_dump_buf,
+               .size = sizeof(sync_dump_buf) - 1,
+       };
+       int i;
+
+       seq_printf(&s, "fence:\n--------------\n");
+       sync_print_fence(&s, fence);
+       seq_printf(&s, "\n");
+
+       for (i = 0; i < s.count; i += DUMP_CHUNK) {
+               if ((s.count - i) > DUMP_CHUNK) {
+                       char c = s.buf[i + DUMP_CHUNK];
+                       s.buf[i + DUMP_CHUNK] = 0;
+                       pr_cont("%s", s.buf + i);
+                       s.buf[i + DUMP_CHUNK] = c;
+               } else {
+                       s.buf[s.count] = 0;
+                       pr_cont("%s", s.buf + i);
+               }
+       }
+}
+#else
+static void sync_dump(struct sync_fence *fence)
+{
+}
 #endif

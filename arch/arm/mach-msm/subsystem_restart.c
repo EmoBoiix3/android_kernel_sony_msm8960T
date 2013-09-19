@@ -74,6 +74,7 @@ struct subsys_device {
 	struct work_struct work;
 	spinlock_t restart_lock;
 	bool restarting;
+	enum subsys_state state;
 
 	void *notify;
 	struct device dev;
@@ -181,6 +182,20 @@ static struct subsys_soc_restart_order *restart_orders_8960_sglte[] = {
 	&restart_orders_8960_fusion_sglte,
 	};
 
+/* SGLTE2 restart ordering info*/
+static const char * const order_8064_sglte2[] = {"external_modem",
+						"external_modem_mdm"};
+
+static struct subsys_soc_restart_order restart_orders_8064_fusion_sglte2 = {
+	.subsystem_list = order_8064_sglte2,
+	.count = ARRAY_SIZE(order_8064_sglte2),
+	.subsys_ptrs = {[ARRAY_SIZE(order_8064_sglte2)] = NULL}
+	};
+
+static struct subsys_soc_restart_order *restart_orders_8064_sglte2[] = {
+	&restart_orders_8064_fusion_sglte2,
+	};
+
 /* These will be assigned to one of the sets above after
  * runtime SoC identification.
  */
@@ -199,6 +214,7 @@ static int restart_level_set(const char *val, struct kernel_param *kp)
 {
 	int ret;
 	int old_val = restart_level;
+	int subtype;
 
 	if (cpu_is_msm9615()) {
 		pr_err("Only Phase 1 subsystem restart is supported\n");
@@ -211,7 +227,9 @@ static int restart_level_set(const char *val, struct kernel_param *kp)
 
 	switch (restart_level) {
 	case RESET_SUBSYS_INDEPENDENT:
-		if (socinfo_get_platform_subtype() == PLATFORM_SUBTYPE_SGLTE) {
+		subtype = socinfo_get_platform_subtype();
+		if ((subtype == PLATFORM_SUBTYPE_SGLTE) ||
+			(subtype == PLATFORM_SUBTYPE_SGLTE2)) {
 			pr_info("Phase 3 is currently unsupported. Using phase 2 instead.\n");
 			restart_level = RESET_SUBSYS_COUPLED;
 		}
@@ -228,6 +246,20 @@ static int restart_level_set(const char *val, struct kernel_param *kp)
 
 module_param_call(restart_level, restart_level_set, param_get_int,
 			&restart_level, 0644);
+
+static void subsys_set_state(struct subsys_device *subsys,
+			     enum subsys_state state)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&subsys->restart_lock, flags);
+	if (subsys->state != state) {
+		subsys->state = state;
+		spin_unlock_irqrestore(&subsys->restart_lock, flags);
+		return;
+	}
+	spin_unlock_irqrestore(&subsys->restart_lock, flags);
+}
 
 static struct subsys_soc_restart_order *
 update_restart_order(struct subsys_device *dev)
@@ -350,6 +382,7 @@ static void subsystem_shutdown(struct subsys_device *dev, void *data)
 	if (dev->desc->shutdown(dev->desc) < 0) {
 		panic("subsys-restart: [%p]: Failed to shutdown %s!",
 			current, name);
+	}
 	subsys_set_state(dev, SUBSYS_OFFLINE);
 }
 
@@ -370,6 +403,7 @@ static void subsystem_powerup(struct subsys_device *dev, void *data)
 	if (dev->desc->powerup(dev->desc) < 0) {
 		panic("[%p]: Failed to powerup %s!", current, name);
 	}
+	subsys_set_state(dev, SUBSYS_ONLINE);
 }
 
 static void subsystem_restart_wq_func(struct work_struct *work)
@@ -649,27 +683,10 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 	if (!subsys)
 		return ERR_PTR(-ENOMEM);
 
-	subsys->desc = desc;
-	subsys->owner = desc->owner;
-	subsys->dev.parent = desc->dev;
-	subsys->dev.bus = &subsys_bus_type;
-	subsys->dev.release = subsys_device_release;
-	subsys->state = SUBSYS_ONLINE; /* Until proper refcounting appears */
-
-	subsys->notify = subsys_notif_add_subsys(desc->name);
-	subsys->restart_order = update_restart_order(subsys);
-
-	snprintf(subsys->wlname, sizeof(subsys->wlname), "ssr(%s)", desc->name);
-	wake_lock_init(&subsys->wake_lock, WAKE_LOCK_SUSPEND, subsys->wlname);
-	INIT_WORK(&subsys->work, subsystem_restart_wq_func);
-	spin_lock_init(&subsys->restart_lock);
-
-	subsys->id = ida_simple_get(&subsys_ida, 0, 0, GFP_KERNEL);
-	if (subsys->id < 0) {
-		ret = subsys->id;
-		goto err_ida;
-	}
-	dev_set_name(&subsys->dev, "subsys%d", subsys->id);
+	dev->desc = desc;
+	dev->notify = subsys_notif_add_subsys(desc->name);
+	dev->restart_order = update_restart_order(dev);
+	dev->state = SUBSYS_ONLINE; /* Until proper refcounting appears */
 
 	mutex_init(&subsys->shutdown_lock);
 	mutex_init(&subsys->powerup_lock);
@@ -762,13 +779,14 @@ static int __init ssr_init_soc_restart_orders(void)
 		n_restart_orders = ARRAY_SIZE(restart_orders_8960_sglte);
 	}
 
+	if (socinfo_get_platform_subtype() == PLATFORM_SUBTYPE_SGLTE2) {
+		restart_orders = restart_orders_8064_sglte2;
+		n_restart_orders = ARRAY_SIZE(restart_orders_8064_sglte2);
+	}
+
 	for (i = 0; i < n_restart_orders; i++) {
 		mutex_init(&restart_orders[i]->powerup_lock);
 		mutex_init(&restart_orders[i]->shutdown_lock);
-	}
-
-	if (restart_orders == NULL || n_restart_orders < 1) {
-		WARN_ON(1);
 	}
 
 	return 0;
