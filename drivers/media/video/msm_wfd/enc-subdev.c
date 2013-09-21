@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, Linux Foundation. All rights reserved.
 *
 * This program is free software; you can redistribute it and/or modify
 * it under the terms of the GNU General Public License version 2 and
@@ -1353,6 +1353,93 @@ static long venc_set_max_perf_level(struct video_client_ctx *client_ctx,
 err_set_perf_level:
 	return rc;
 }
+
+static long venc_set_avc_delimiter(struct video_client_ctx *client_ctx,
+			__s32 flag)
+{
+	struct vcd_property_hdr vcd_property_hdr;
+	struct vcd_property_avc_delimiter_enable delimiter_flag;
+	if (!client_ctx)
+		return -EINVAL;
+
+	vcd_property_hdr.prop_id = VCD_I_ENABLE_DELIMITER_FLAG;
+	vcd_property_hdr.sz =
+			sizeof(struct vcd_property_avc_delimiter_enable);
+	delimiter_flag.avc_delimiter_enable_flag = flag;
+	return vcd_set_property(client_ctx->vcd_handle,
+				&vcd_property_hdr, &delimiter_flag);
+}
+
+static long venc_get_avc_delimiter(struct video_client_ctx *client_ctx,
+			__s32 *flag)
+{
+	struct vcd_property_hdr vcd_property_hdr;
+	struct vcd_property_avc_delimiter_enable delimiter_flag;
+	int rc = 0;
+
+	if (!client_ctx || !flag)
+		return -EINVAL;
+
+	vcd_property_hdr.prop_id = VCD_I_ENABLE_DELIMITER_FLAG;
+	vcd_property_hdr.sz =
+			sizeof(struct vcd_property_avc_delimiter_enable);
+	rc = vcd_get_property(client_ctx->vcd_handle,
+				&vcd_property_hdr, &delimiter_flag);
+
+	if (rc < 0) {
+		WFD_MSG_ERR("Failed getting property for delimiter");
+		return rc;
+	}
+
+	*flag = delimiter_flag.avc_delimiter_enable_flag;
+	return rc;
+}
+
+static long venc_set_vui_timing_info(struct video_client_ctx *client_ctx,
+			struct venc_inst *inst, __s32 flag)
+{
+	struct vcd_property_hdr vcd_property_hdr;
+	struct vcd_property_vui_timing_info_enable vui_timing_info_enable;
+
+	if (!client_ctx)
+		return -EINVAL;
+	if (inst->framerate_mode == VENC_MODE_VFR) {
+		WFD_MSG_INFO("VUI timing info not suported in VFR mode ");
+		return -EINVAL;
+	}
+	vcd_property_hdr.prop_id = VCD_I_ENABLE_VUI_TIMING_INFO;
+	vcd_property_hdr.sz =
+			sizeof(struct vcd_property_vui_timing_info_enable);
+	vui_timing_info_enable.vui_timing_info = flag;
+	return vcd_set_property(client_ctx->vcd_handle,
+				&vcd_property_hdr, &vui_timing_info_enable);
+}
+
+static long venc_get_vui_timing_info(struct video_client_ctx *client_ctx,
+			__s32 *flag)
+{
+	struct vcd_property_hdr vcd_property_hdr;
+	struct vcd_property_vui_timing_info_enable vui_timing_info_enable;
+	int rc = 0;
+
+	if (!client_ctx || !flag)
+		return -EINVAL;
+
+	vcd_property_hdr.prop_id = VCD_I_ENABLE_VUI_TIMING_INFO;
+	vcd_property_hdr.sz =
+			sizeof(struct vcd_property_vui_timing_info_enable);
+	rc = vcd_get_property(client_ctx->vcd_handle,
+				&vcd_property_hdr, &vui_timing_info_enable);
+
+	if (rc < 0) {
+		WFD_MSG_ERR("Failed getting property for VUI timing info");
+		return rc;
+	}
+
+	*flag = vui_timing_info_enable.vui_timing_info;
+	return rc;
+}
+
 static long venc_set_header_mode(struct video_client_ctx *client_ctx,
 		__s32 mode)
 {
@@ -1859,6 +1946,7 @@ err:
 static long venc_fill_outbuf(struct v4l2_subdev *sd, void *arg)
 {
 	int rc = 0;
+	u32 ion_flag = 0;
 	struct venc_inst *inst = sd->dev_priv;
 	struct video_client_ctx *client_ctx = &inst->venc_client;
 	struct mem_region *mregion = arg;
@@ -1866,6 +1954,7 @@ static long venc_fill_outbuf(struct v4l2_subdev *sd, void *arg)
 	unsigned long kernel_vaddr, phy_addr, user_vaddr;
 	int pmem_fd;
 	struct file *file;
+	struct ion_handle *buff_handle = NULL;
 	s32 buffer_index = -1;
 
 	if (inst->streaming) {
@@ -1878,9 +1967,14 @@ static long venc_fill_outbuf(struct v4l2_subdev *sd, void *arg)
 			WFD_MSG_ERR("Address lookup failed\n");
 			goto err;
 		}
+		ion_flag = vidc_get_fd_info(client_ctx, BUFFER_TYPE_OUTPUT,
+				pmem_fd, kernel_vaddr, buffer_index,
+				&buff_handle);
+
 		vcd_frame.virtual = (u8 *) kernel_vaddr;
 		vcd_frame.frm_clnt_data = mregion->cookie;
 		vcd_frame.alloc_len = mregion->size;
+		vcd_frame.buff_ion_handle = buff_handle;
 
 		rc = vcd_fill_output_buffer(client_ctx->vcd_handle, &vcd_frame);
 		if (rc)
@@ -1982,8 +2076,8 @@ static long venc_alloc_recon_buffers(struct v4l2_subdev *sd, void *arg)
 				rc = ion_map_iommu(client_ctx->user_ion_client,
 					client_ctx->recon_buffer_ion_handle[i],
 					VIDEO_DOMAIN, VIDEO_MAIN_POOL, SZ_4K,
-					0, &phy_addr, (unsigned long *)&len,
-					0, 0);
+					ctrl->buffer_size * 2, &phy_addr,
+					(unsigned long *)&len, 0, 0);
 				 if (rc || !phy_addr) {
 					WFD_MSG_ERR(
 						"ion map iommu failed, rc = %d, phy_addr = 0x%lx\n",
@@ -1991,6 +2085,12 @@ static long venc_alloc_recon_buffers(struct v4l2_subdev *sd, void *arg)
 					goto unmap_ion_alloc;
 				}
 
+				 msm_ion_do_cache_op(
+					 client_ctx->user_ion_client,
+					 client_ctx->recon_buffer_ion_handle[i],
+					 ctrl->kernel_virtual_addr,
+					 ctrl->buffer_size,
+					 ION_IOC_CLEAN_INV_CACHES);
 			}
 			ctrl->physical_addr =  (u8 *) phy_addr;
 			ctrl->dev_addr = ctrl->physical_addr;
@@ -2310,6 +2410,76 @@ static long venc_get_property(struct v4l2_subdev *sd, void *arg)
 		break;
 	}
 	return rc;
+}
+
+
+long venc_mmap(struct v4l2_subdev *sd, void *arg)
+{
+	struct venc_inst *inst = NULL;
+	struct mem_region_map *mmap = arg;
+	struct mem_region *mregion = NULL;
+	unsigned long rc = 0, size = 0;
+	void *paddr = NULL;
+
+	if (!sd) {
+		WFD_MSG_ERR("Subdevice required for %s\n", __func__);
+		return -EINVAL;
+	} else if (!mmap || !mmap->mregion) {
+		WFD_MSG_ERR("Memregion required for %s\n", __func__);
+		return -EINVAL;
+	}
+
+	inst = sd->dev_priv;
+	mregion = mmap->mregion;
+	if (mregion->size % SZ_4K != 0) {
+		WFD_MSG_ERR("Memregion not aligned to %d\n", SZ_4K);
+		return -EINVAL;
+	}
+
+	if (inst->secure) {
+		rc = ion_phys(mmap->ion_client, mregion->ion_handle,
+				(unsigned long *)&paddr,
+				(size_t *)&size);
+	} else {
+		rc = ion_map_iommu(mmap->ion_client, mregion->ion_handle,
+				VIDEO_DOMAIN, VIDEO_MAIN_POOL, SZ_4K,
+				0, (unsigned long *)&paddr,
+				&size, 0, 0);
+	}
+
+	if (rc) {
+		WFD_MSG_ERR("Failed to get physical addr\n");
+		paddr = NULL;
+	} else if (size < mregion->size) {
+		WFD_MSG_ERR("Failed to map enough memory\n");
+		rc = -ENOMEM;
+	}
+
+	mregion->paddr = paddr;
+	return rc;
+}
+
+long venc_munmap(struct v4l2_subdev *sd, void *arg)
+{
+	struct venc_inst *inst = NULL;
+	struct mem_region_map *mmap = arg;
+	struct mem_region *mregion = NULL;
+	if (!sd) {
+		WFD_MSG_ERR("Subdevice required for %s\n", __func__);
+		return -EINVAL;
+	} else if (!mmap || !mmap->mregion) {
+		WFD_MSG_ERR("Memregion required for %s\n", __func__);
+		return -EINVAL;
+	}
+
+	inst = sd->dev_priv;
+	mregion = mmap->mregion;
+	if (!inst->secure) {
+		ion_unmap_iommu(mmap->ion_client, mregion->ion_handle,
+				VIDEO_DOMAIN, VIDEO_MAIN_POOL);
+	}
+
+	return 0;
 }
 
 long venc_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)

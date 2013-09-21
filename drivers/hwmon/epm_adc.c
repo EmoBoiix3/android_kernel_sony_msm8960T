@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -599,7 +599,7 @@ static int epm_adc_blocking_conversion(struct epm_adc_drv *epm_adc,
 {
 	struct epm_adc_platform_data *pdata = epm_adc->pdev->dev.platform_data;
 	int32_t channel_num = 0, mux_chan_idx = 0;
-	char adc_data[3];
+	char adc_data[3] = { 0 };
 	int rc = 0;
 
 	mutex_lock(&epm_adc->conv_lock);
